@@ -16,9 +16,9 @@ Aveți la dispoziție comanda /hac, prin intermediul căreia puteți accesa meni
 
 ![](https://i.imgur.com/oYLcoE0.jpeg) ![](https://i.imgur.com/ifF5cAd.jpeg)
 
-# Instalare:
+## Instalare
+
 Copiați conținutul din hitman-console și îl amplasați în folderul MoonLoader.
-------
 
 Principiul este simplu: luați un contract ca de obicei:
 - /turn off
