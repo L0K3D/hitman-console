@@ -1,0 +1,50 @@
+{
+  "settings": {
+    "visible": {
+      "report": {
+        "enabled": true,
+        "targets": true,
+        "hours": true
+      },
+      "console": {
+        "enabled": true,
+        "phone": true,
+        "distok": true,
+        "reward": true,
+        "contract": true,
+        "ammo": true
+      },
+      "target": {
+        "enabled": true,
+        "name": true,
+        "faction": true,
+        "state": true,
+        "skin": true
+      }
+    },
+    "features": {
+      "keep10s": true,
+      "tgtnoc": false,
+      "hidecp": false,
+      "logincd": true
+    },
+    "primary": [
+      0.36,
+      0.64,
+      0.98
+    ],
+    "opacity": 93,
+    "backupHi": false
+  },
+  "stats": {},
+  "messages": {
+    "iesi": [
+      "poti sa iesi pana afara te rog?",
+      "salut, sunt blocat afara si adminii nu raspund, poti veni sa imi dai kill?"
+    ],
+    "stai": [
+      "salut, poti sa te opresti te rog sa urc si eu?",
+      "salut, poti sa te opresti putin? sunt in spate"
+    ]
+  }
+}
