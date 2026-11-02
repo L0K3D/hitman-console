@@ -1,4 +1,4 @@
-local MOD_VERSION = "2.0"
+local MOD_VERSION = "2.1"
 
 script_name("Hitman Console")
 script_author("L0K3D")
@@ -9,6 +9,8 @@ local models = require 'game.models'
 local imgui  = require 'mimgui'
 local fa     = require 'fAwesome6_solid'
 local json   = require 'dkjson'
+local ffi    = require 'ffi'
+local okLfs, lfs = pcall(require, 'lfs')
 
 local ImVec2, ImVec4 = imgui.ImVec2, imgui.ImVec4
 
@@ -39,6 +41,8 @@ local target = {
     number = nil,
     lastUpdate = 0,
 }
+
+local lastTargetName = nil
 
 local backupMode = false
 local VK_Y = 0x59
@@ -89,6 +93,19 @@ local secDone = false
 local secLoginPhase = false
 local secEndTime = 0
 local secFont = nil
+local secAutoPending = false
+local secIdle = false
+local secResyncAt = nil
+local awaitMotd = true
+local lastActive = os.clock()
+local activePos = nil
+local SEC_IDLE = 30
+local SEC_RESYNC_DELAY = 1.5
+
+local function markActive()
+    lastActive = os.clock()
+end
+
 local cancelTime = 0
 local contractIndoors = false
 
@@ -168,6 +185,34 @@ local prim = new.float[3](0.36, 0.64, 0.98)
 local opacity = new.int(93)
 local backupHi = new.bool(false)
 
+local shotsDirBuf = new.char[256]()
+local albumMode   = new.int(0)
+
+local function setStr(buf, s, cap)
+    s = tostring(s or ""):sub(1, cap - 1)
+    ffi.fill(buf, cap)
+    ffi.copy(buf, s)
+end
+
+local function dirExists(path)
+    if not okLfs or not path or path == "" then return false end
+    local ok, a = pcall(lfs.attributes, path)
+    return ok and type(a) == "table" and a.mode == "directory"
+end
+
+local function defaultShotsDir()
+    local up = os.getenv("USERPROFILE") or "C:"
+    local tries = {
+        up .. "\\Documents\\GTA San Andreas User Files\\SAMP\\screens",
+        up .. "\\OneDrive\\Documents\\GTA San Andreas User Files\\SAMP\\screens",
+        up .. "\\Documents\\GTA San Andreas User Files\\Gallery",
+    }
+    for _, d in ipairs(tries) do
+        if dirExists(d) then return d end
+    end
+    return tries[1]
+end
+
 local DEFAULT_MESSAGES = {
     iesi = {
         "poti sa iesi pana afara te rog?",
@@ -225,6 +270,8 @@ local function buildData()
             primary  = { prim[0], prim[1], prim[2] },
             opacity  = opacity[0],
             backupHi = backupHi[0] and true or false,
+            shotsDir  = ffi.string(shotsDirBuf),
+            albumMode = albumMode[0],
         },
         stats    = stats,
         messages = messages,
@@ -330,6 +377,11 @@ do
     if op then opacity[0] = math.max(40, math.min(100, math.floor(op))) end
     if data.settings.backupHi ~= nil then backupHi[0] = data.settings.backupHi and true or false end
 
+    local sd = data.settings.shotsDir
+    if type(sd) ~= "string" or sd == "" then sd = defaultShotsDir() end
+    setStr(shotsDirBuf, (sd:gsub("[\\/]+$", "")), 256)
+    albumMode[0] = (tonumber(data.settings.albumMode) == 1) and 1 or 0
+
     for day, d in pairs(data.stats) do
         if type(d) == "table" then
             stats[day] = {
@@ -384,6 +436,10 @@ local function commas(n)
         s = nw
     end
     return s
+end
+
+local function dots(n)
+    return (commas(n):gsub(",", "."))
 end
 
 local function monthLabel(ym)
@@ -528,7 +584,17 @@ function main()
 
     for _, i in ipairs({ 2046, 2047 }) do if sampTextdrawIsExists(i) then sampTextdrawDelete(i) end end
 
-    local function toggleSettings() settingsOpen[0] = not settingsOpen[0] end
+    local function toggleSettings(arg)
+        if type(arg) == "string" and arg:lower():match("^%s*fix%s*$") then
+            sampAddChatMessage("{5CA3FA}Hitman Console{FFFFFF}: reloading to reset the menu...", -1)
+            lua_thread.create(function()
+                wait(100)
+                thisScript():reload()
+            end)
+            return
+        end
+        settingsOpen[0] = not settingsOpen[0]
+    end
     sampRegisterChatCommand("hitmanconsole", toggleSettings)
     sampRegisterChatCommand("hac", toggleSettings)
 
@@ -622,14 +688,40 @@ function main()
             end
         end
 
+        local px, py, pz = getCharCoordinates(PLAYER_PED)
+        if not activePos then
+            activePos = { px, py, pz }
+        elseif (px - activePos[1]) ^ 2 + (py - activePos[2]) ^ 2 + (pz - activePos[3]) ^ 2 > 0.09 then
+            activePos[1], activePos[2], activePos[3] = px, py, pz
+            markActive()
+        end
+
+        if secAutoPending and os.clock() >= secExpect then secAutoPending = false end
+
         if secActive then
             local n
             if secLoginPhase then
                 local clk = os.clock()
                 local cdt = clk - secLastClk
                 secLastClk = clk
-                if cdt > 0 and cdt < 1.0 then secValue = secValue + cdt end
+                if clk - lastActive >= SEC_IDLE then
+                    secIdle = true
+                    secResyncAt = nil
+                elseif secIdle then
+                    secIdle = false
+                    secResyncAt = clk + SEC_RESYNC_DELAY
+                end
+                if cdt > 0 and cdt < 1.0 and not secIdle and not isPauseMenuActive() then secValue = secValue + cdt end
                 n = math.floor(secValue)
+
+                if secResyncAt and clk >= secResyncAt and not isPauseMenuActive() then
+                    secResyncAt = nil
+                    if not secDone and n < 300 and feat.logincd[0] then
+                        secAutoPending = true
+                        secExpect = clk + 4
+                        sampSendChat("/sec")
+                    end
+                end
             else
                 n = os.time() - secEndTime
             end
@@ -651,7 +743,12 @@ function main()
                             txt = "Next contract at " .. os.date("%H:%M", secEndTime + 300)
                         end
                     end
-                    local col = ready and 0xFF33CC33 or 0xFFE53935
+                    local col = 0xFFE53935
+                    if ready then
+                        col = 0xFF33CC33
+                    elseif secLoginPhase and secIdle then
+                        col = 0xFFFFB300
+                    end
                     local sw, sh = getScreenResolution()
                     local tw = renderGetFontDrawTextLength(secFont, txt)
                     renderFontDrawText(secFont, txt, sw - tw - 20, sh * 0.96 - 30, col)
@@ -868,6 +965,10 @@ function sampev.onServerMessage(color, text)
     if os.clock() < secExpect then
         local bare = text:gsub("{%x%x%x%x%x%x}", ""):match("^%s*(%d+)%s*$")
         if bare then
+            local auto = secAutoPending
+            secAutoPending = false
+            secIdle = false
+            secResyncAt = nil
             if secLoginPhase or not secActive then
                 secActive = true
                 secLoginPhase = true
@@ -875,6 +976,7 @@ function sampev.onServerMessage(color, text)
                 secLastClk = os.clock()
             end
             secExpect = 0
+            if auto then return false end
         end
     end
 
@@ -925,12 +1027,17 @@ function sampev.onServerMessage(color, text)
         end
     end
 
-    if text:find("(Group) MOTD:", 1, true) then
+    if awaitMotd and text:find("(Group) MOTD:", 1, true) then
+        awaitMotd = false
         secActive = true
         secValue = 0
         secLastClk = os.clock()
         secDone = false
         secLoginPhase = true
+        secAutoPending = false
+        secIdle = false
+        secResyncAt = nil
+        markActive()
         cancelTime = 0
     end
 
@@ -966,6 +1073,7 @@ function sampev.onServerMessage(color, text)
     if cName then
         contract.active = true
         contract.name = cleanName(cName)
+        lastTargetName = contract.name
         if cPid then contract.pid = cPid end
 
         if cPid and not contract.found then
@@ -998,7 +1106,8 @@ function sampev.onServerMessage(color, text)
 
     local sName, sAmt = text:match("^(.-) has a contract of (%$[%d,]+) on him")
     if sName and sAmt then
-        contract.sum = sAmt
+        local sNum = tonumber((sAmt:gsub("[%$,]", "")))
+        contract.sum = sNum and ("$" .. dots(sNum)) or sAmt
         if contract.hideCheck then
             contract.hideCheck = false
             return false
@@ -1064,16 +1173,17 @@ function sampev.onServerMessage(color, text)
     end
 
     if os.clock() < report.expect then
-        local rd, rt = text:match("Targets killed:%s*(%d+)%s*/%s*(%d+)")
-        if not rd then rd, rt = text:match("Contracte efectuate:%s*(%d+)%s*/%s*(%d+)") end
+        local plain = text:gsub("{%x%x%x%x%x%x}", "")
+        local rd, rt = plain:match("Targets killed:%s*(%-?%d+)%s*/%s*(%-?%d+)")
+        if not rd then rd, rt = plain:match("Contracte efectuate:%s*(%-?%d+)%s*/%s*(%-?%d+)") end
         if rd and rt then
             report.done, report.total, report.active = rd, rt, true
             if os.clock() < report.hideUntil then return false end
             return
         end
 
-        local rh, rhr = text:match("Hours played:%s*([%d:]+)%s*/%s*([%d:]+)")
-        if not rh then rh, rhr = text:match("Ore jucate:%s*([%d:]+)%s*/%s*([%d:]+)") end
+        local rh, rhr = plain:match("Hours played:%s*([%-%d:]+)%s*/%s*([%-%d:]+)")
+        if not rh then rh, rhr = plain:match("Ore jucate:%s*([%-%d:]+)%s*/%s*([%-%d:]+)") end
         if rh and rhr then
             report.hours, report.hoursReq, report.active = rh, rhr, true
             if os.clock() < report.hideUntil then return false end
@@ -1112,12 +1222,21 @@ end
 function sampev.onSendCommand(cmd)
     if type(cmd) ~= "string" then return end
     local lc = cmd:lower()
+    markActive()
     if lc:find("^/raport") then
         report.expect = os.clock() + 12
     end
-    if lc:find("^/sec") then
+    if lc:match("^/sec%s*$") then
         secExpect = os.clock() + 4
     end
+end
+
+function sampev.onSendChat()
+    markActive()
+end
+
+function sampev.onConnectionRequestAccepted()
+    awaitMotd = true
 end
 
 local HUD_WIDTH = 300
@@ -1142,8 +1261,6 @@ local HUD_FLAGS_CLICK = imgui.WindowFlags.NoTitleBar
     + imgui.WindowFlags.NoScrollWithMouse
     + imgui.WindowFlags.NoCollapse
     + imgui.WindowFlags.NoSavedSettings
-    + imgui.WindowFlags.NoFocusOnAppearing
-    + imgui.WindowFlags.NoBringToFrontOnFocus
     + imgui.WindowFlags.AlwaysAutoResize
 
 local FONT_SIZE = 16.0
@@ -1161,6 +1278,30 @@ imgui.OnInitialize(function()
 end)
 
 local function u32(col) return imgui.ColorConvertFloat4ToU32(col) end
+
+local MOUSE_VK = { [0] = 0x01, [1] = 0x02, [2] = 0x04 }
+
+local function fixStuckInput()
+    local ok, io = pcall(imgui.GetIO)
+    if not ok or not io then return end
+    for i = 0, 2 do
+        if io.MouseDown[i] and not isKeyDown(MOUSE_VK[i]) then
+            io.MouseDown[i] = false
+        end
+    end
+    if io.KeyCtrl and not isKeyDown(0x11) then
+        io.KeyCtrl = false
+        io.KeysDown[0x11] = false
+    end
+    if io.KeyShift and not isKeyDown(0x10) then
+        io.KeyShift = false
+        io.KeysDown[0x10] = false
+    end
+    if io.KeyAlt and not isKeyDown(0x12) then
+        io.KeyAlt = false
+        io.KeysDown[0x12] = false
+    end
+end
 
 local function cardHeader(ic, title, col)
     local dl = imgui.GetWindowDrawList()
@@ -1378,6 +1519,7 @@ consoleFrame = imgui.OnFrame(
         return target.active or contract.active
     end,
     function()
+        fixStuckInput()
         drawConsole()
         drawSkin()
         drawReport()
@@ -1428,12 +1570,509 @@ local function renderCat(cat)
     return changed
 end
 
-imgui.OnFrame(
-    function() return settingsOpen[0] end,
+local SHOT_EXT      = { png = true, jpg = true, jpeg = true, bmp = true }
+local SHOT_CACHE    = 8
+local SHOT_PER_PAGE = 6
+local SHOT_COLS     = 3
+local CURL_PATH     = (os.getenv("SystemRoot") or "C:\\Windows") .. "\\System32\\curl.exe"
+local UPLOAD_OUT    = getWorkingDirectory() .. "\\hac_upload.out"
+local CATBOX_URL    = "https://catbox.moe/user/api.php"
+local CATBOX_ALBUM  = "https://catbox.moe/c/"
+
+ffi.cdef[[
+typedef struct {
+    unsigned long  cb;
+    char*          lpReserved;
+    char*          lpDesktop;
+    char*          lpTitle;
+    unsigned long  dwX, dwY, dwXSize, dwYSize, dwXCountChars, dwYCountChars, dwFillAttribute, dwFlags;
+    unsigned short wShowWindow, cbReserved2;
+    unsigned char* lpReserved2;
+    void*          hStdInput;
+    void*          hStdOutput;
+    void*          hStdError;
+} HAC_STARTUPINFOA;
+typedef struct { void* hProcess; void* hThread; unsigned long pid; unsigned long tid; } HAC_PROCINFO;
+int CreateProcessA(const char*, char*, void*, void*, int, unsigned long, void*, const char*, HAC_STARTUPINFOA*, HAC_PROCINFO*);
+unsigned long WaitForSingleObject(void*, unsigned long);
+int CloseHandle(void*);
+]]
+
+local shots       = {}
+local shotsLoaded = false
+local shotsTabOpen = false
+local shotPage    = 0
+local shotSel     = nil
+local shotTex     = {}
+local shotBudget  = 0
+local shotConfirm = nil
+local shotMark    = {}
+local shotLinks   = {}
+local albumLink   = nil
+local upload      = { active = false, name = nil, status = nil, since = 0 }
+
+local function shotsDir()
+    return (ffi.string(shotsDirBuf):gsub("[\\/]+$", ""))
+end
+
+local function spawnHidden(cmd)
+    local si = ffi.new("HAC_STARTUPINFOA")
+    si.cb = ffi.sizeof("HAC_STARTUPINFOA")
+    si.dwFlags = 0x00000001
+    si.wShowWindow = 0
+    local pi = ffi.new("HAC_PROCINFO")
+    local buf = ffi.new("char[?]", #cmd + 1)
+    ffi.copy(buf, cmd)
+    if ffi.C.CreateProcessA(nil, buf, nil, nil, 0, 0x08000000, nil, nil, si, pi) == 0 then
+        return nil
+    end
+    return pi
+end
+
+local function openFolder(path)
+    if path == "" then return end
+    local pi = spawnHidden(('explorer.exe "%s"'):format(path))
+    if pi then
+        ffi.C.CloseHandle(pi.hThread)
+        ffi.C.CloseHandle(pi.hProcess)
+    end
+end
+
+local function refreshShots(keepView)
+    local prevPath = (shotSel and shots[shotSel]) and shots[shotSel].path or nil
+    local prevPage = shotPage
+    shots = {}
+    shotSel, shotConfirm, shotPage = nil, nil, 0
+    shotsLoaded = true
+
+    local function restore()
+        if not keepView then return end
+        if prevPath then
+            for i, s in ipairs(shots) do
+                if s.path == prevPath then shotSel = i break end
+            end
+        end
+        local pages = math.max(1, math.ceil(#shots / SHOT_PER_PAGE))
+        shotPage = math.max(0, math.min(prevPage, pages - 1))
+    end
+
+    local dir = shotsDir()
+    if not (okLfs and dirExists(dir)) then return end
+    pcall(function()
+        for name in lfs.dir(dir) do
+            local ext = name:match("%.(%a+)$")
+            if ext and SHOT_EXT[ext:lower()] then
+                local path = dir .. "\\" .. name
+                local a = lfs.attributes(path)
+                if a and a.mode == "file" then
+                    shots[#shots + 1] = { name = name, path = path, time = a.modification or 0, size = a.size or 0 }
+                end
+            end
+        end
+    end)
+    table.sort(shots, function(a, b) return a.time > b.time end)
+    restore()
+end
+
+local function shotAspect(e)
+    if e.ar then return e.ar end
+    local ar = 16 / 9
+    if e.name:lower():match("%.png$") then
+        local w, h = pngSize(e.path)
+        if w and h and w > 0 and h > 0 then ar = w / h end
+    end
+    e.ar = ar
+    return ar
+end
+
+local function trimShotCache(keep)
+    local list = {}
+    for k, v in pairs(shotTex) do list[#list + 1] = { k = k, t = v.last or 0 } end
+    if #list <= SHOT_CACHE then return end
+    table.sort(list, function(a, b) return a.t < b.t end)
+    for i = 1, #list - SHOT_CACHE do
+        local k = list[i].k
+        if k ~= keep then
+            local v = shotTex[k]
+            shotTex[k] = nil
+            if v and v.tex then pcall(imgui.ReleaseTexture, v.tex) end
+        end
+    end
+end
+
+local function dropShotTex(path)
+    local v = shotTex[path]
+    if v then
+        shotTex[path] = nil
+        if v.tex then pcall(imgui.ReleaseTexture, v.tex) end
+    end
+end
+
+local function shotTexture(e)
+    local c = shotTex[e.path]
+    if c then
+        c.last = os.clock()
+        return c
+    end
+    if shotBudget <= 0 then return nil end
+    shotBudget = shotBudget - 1
+    local ok, tex = pcall(imgui.CreateTextureFromFile, e.path)
+    shotTex[e.path] = { tex = (ok and tex) or nil, last = os.clock() }
+    trimShotCache(e.path)
+    return shotTex[e.path]
+end
+
+local function readUploadOut()
+    local f = io.open(UPLOAD_OUT, "rb")
+    if not f then return "" end
+    local raw = f:read("*a") or ""
+    f:close()
+    return raw
+end
+
+local function curlRun(cmd, timeout)
+    os.remove(UPLOAD_OUT)
+    local pi = spawnHidden(cmd)
+    if not pi then return nil, "could not start curl.exe" end
+    local t0 = os.clock()
+    while os.clock() - t0 < (timeout or 300) do
+        if ffi.C.WaitForSingleObject(pi.hProcess, 0) == 0 then break end
+        wait(250)
+    end
+    ffi.C.CloseHandle(pi.hThread)
+    ffi.C.CloseHandle(pi.hProcess)
+    local raw = readUploadOut()
+    os.remove(UPLOAD_OUT)
+    return raw
+end
+
+local function cleanErr(raw)
+    if not raw or raw == "" then return nil end
+    return (raw:gsub("%s+", " "):gsub("^%s+", ""):sub(1, 140))
+end
+
+local function uploadOne(entry)
+    local cmd = ('"%s" -s -m 300 -F "reqtype=fileupload" -F "fileToUpload=@%s" -o "%s" "%s"')
+        :format(CURL_PATH, entry.path, UPLOAD_OUT, CATBOX_URL)
+
+    local raw, err = curlRun(cmd)
+    if not raw then return nil, err end
+
+    local link = raw:match("^%s*(https?://%S+)%s*$")
+    if link then return link end
+    return nil, cleanErr(raw) or "no answer from Catbox"
+end
+
+local function albumTitle()
+    local stamp = os.date("%d.%m.%Y %H:%M")
+    if albumMode[0] == 1 and lastTargetName and lastTargetName ~= "" then
+        local name = lastTargetName:gsub("[^%w%[%]%(%)%._@%$= -]", ""):gsub("^%s+", ""):gsub("%s+$", "")
+        if name ~= "" then return name .. " " .. stamp end
+    end
+    return "Hitman Console " .. stamp
+end
+
+local function createAlbum(names)
+    local cmd = ('"%s" -s -m 120 -F "reqtype=createalbum" -F "title=%s" -F "desc=%d screenshots" -F "files=%s" -o "%s" "%s"')
+        :format(CURL_PATH, albumTitle(), #names, table.concat(names, " "), UPLOAD_OUT, CATBOX_URL)
+    local raw, err = curlRun(cmd, 120)
+    if not raw then return nil, err end
+    local link = raw:match("^%s*(https?://%S+)%s*$")
+    if not link then
+        local short = raw:match("^%s*(%w+)%s*$")
+        if short then link = CATBOX_ALBUM .. short end
+    end
+    if link then return link end
+    return nil, cleanErr(raw) or "no answer from Catbox"
+end
+
+local function startUpload(list, asAlbum)
+    if upload.active then return end
+    if type(list) ~= "table" or #list == 0 then return end
+    if not doesFileExist(CURL_PATH) then
+        upload.status = "curl.exe was not found in Windows."
+        return
+    end
+    asAlbum = asAlbum and #list > 1
+
+    upload.active, upload.status, upload.name = true, nil, list[1].name
+    lua_thread.create(function()
+        local names, done, failed = {}, 0, 0
+        local lastLink, lastErr
+        for i, e in ipairs(list) do
+            upload.name = e.name
+            upload.status = ("Uploading %d / %d: %s"):format(i, #list, e.name)
+            local link, err = uploadOne(e)
+            if link then
+                done = done + 1
+                lastLink = link
+                shotLinks[e.path] = link
+                names[#names + 1] = link:match("([^/]+)$") or link
+            else
+                failed = failed + 1
+                lastErr = err
+            end
+        end
+
+        if asAlbum and #names > 1 then
+            upload.status = ("Making the album from %d pictures..."):format(#names)
+            local l, err = createAlbum(names)
+            if l then albumLink = l else lastErr = err end
+        end
+
+        upload.active = false
+
+        local shown = (asAlbum and albumLink) or (done == 1 and lastLink or nil)
+        if shown then
+            pcall(imgui.SetClipboardText, shown)
+            upload.status = ("Uploaded %d picture(s), link copied: %s"):format(done, shown)
+            sampAddChatMessage("{5CA3FA}HAC{FFFFFF}: " .. ((asAlbum and albumLink) and "album" or list[1].name) .. " -> {5CA3FA}" .. shown, -1)
+        elseif done > 0 then
+            upload.status = ("Uploaded %d picture(s), %d failed. Copy each link from its picture."):format(done, failed)
+        else
+            upload.status = "Upload failed" .. (lastErr and (": " .. lastErr) or ".")
+        end
+    end)
+end
+
+local function clearShotsSession()
+    shotSel, shotConfirm = nil, nil
+    shotsTabOpen = false
+    shotLinks, albumLink = {}, nil
+    upload.status = nil
+    for _, mb in pairs(shotMark) do mb[0] = false end
+    for path, v in pairs(shotTex) do
+        shotTex[path] = nil
+        if v and v.tex then pcall(imgui.ReleaseTexture, v.tex) end
+    end
+end
+
+local function shotButtons(e)
+    local link = shotLinks[e.path]
+    if upload.active then
+        imgui.TextColored(C.title, "%s", icon("CLOUD_ARROW_UP") .. "  Uploading, please wait...")
+    else
+        if imgui.Button(icon("CLOUD_ARROW_UP") .. "  Upload##up", ImVec2(130, 26)) then startUpload({ e }) end
+    end
+    if link then
+        imgui.SameLine()
+        if imgui.Button(icon("COPY") .. "  Copy link##cl", ImVec2(140, 26)) then
+            pcall(imgui.SetClipboardText, link)
+            upload.status = "Link copied: " .. link
+        end
+    end
+    imgui.SameLine()
+    if shotConfirm == e.path then
+        imgui.PushStyleColor(imgui.Col.Button, ImVec4(0.62, 0.17, 0.17, 1.0))
+        imgui.PushStyleColor(imgui.Col.ButtonHovered, ImVec4(0.76, 0.22, 0.22, 1.0))
+        imgui.PushStyleColor(imgui.Col.ButtonActive, ImVec4(0.50, 0.13, 0.13, 1.0))
+        if imgui.Button(icon("TRASH") .. "  Confirm delete##del", ImVec2(170, 26)) then
+            dropShotTex(e.path)
+            os.remove(e.path)
+            shotConfirm = nil
+            shotMark[e.path] = nil
+            shotLinks[e.path] = nil
+            refreshShots(true)
+            upload.status = "Deleted " .. e.name .. " from disk."
+        end
+        imgui.PopStyleColor(3)
+    else
+        if imgui.Button(icon("TRASH") .. "  Delete##del", ImVec2(110, 26)) then shotConfirm = e.path end
+    end
+    if link then
+        imgui.Spacing()
+        imgui.TextColored(C.green, "%s", icon("LINK") .. "  " .. link)
+    end
+end
+
+local function drawShotsTab()
+    local dirty = false
+    if not shotsLoaded then refreshShots() end
+    shotBudget = 1
+
+    imgui.Spacing()
+    sectionHeader("FOLDER_OPEN", "Screenshots folder")
+    imgui.Spacing()
+    imgui.PushItemWidth(420)
+    imgui.InputText("##shotdir", shotsDirBuf, ffi.sizeof(shotsDirBuf))
+    imgui.PopItemWidth()
+    if imgui.IsItemDeactivatedAfterEdit() then
+        dirty = true
+        refreshShots()
+    end
+    imgui.SameLine()
+    if imgui.Button(icon("ROTATE") .. "  Refresh##shots", ImVec2(120, 0)) then refreshShots(true) end
+    imgui.SameLine()
+    if imgui.Button(icon("FOLDER_OPEN") .. "  Open##shots", ImVec2(110, 0)) then openFolder(shotsDir()) end
+
+    if not okLfs then
+        imgui.Spacing()
+        imgui.TextColored(C.red, "%s", "lfs.dll is missing from moonloader\\lib, the folder cannot be read.")
+        return dirty
+    end
+    if not dirExists(shotsDir()) then
+        imgui.Spacing()
+        imgui.TextColored(C.red, "%s", "This folder does not exist. Paste the path where F8 saves your screenshots.")
+        return dirty
+    end
+
+    if upload.status then
+        imgui.Spacing()
+        imgui.TextColored(upload.status:find("Uploaded", 1, true) and C.green or C.dim, "%s", upload.status)
+    end
+
+    imgui.Spacing()
+    local e = shotSel and shots[shotSel] or nil
+    if e then
+        sectionHeader("IMAGES", e.name)
+        imgui.Spacing()
+        if imgui.Button(icon("ARROW_LEFT") .. "  Back##shots", ImVec2(110, 26)) then
+            shotSel, shotConfirm = nil, nil
+        end
+        imgui.SameLine()
+        imgui.AlignTextToFramePadding()
+        imgui.TextColored(C.dim, "%s", ("%s   %.1f MB"):format(os.date("%d.%m.%Y  %H:%M", e.time), e.size / 1048576))
+        imgui.Spacing()
+
+        local c = shotTexture(e)
+        if c and c.tex then
+            local ar = shotAspect(e)
+            local maxH = math.max(140, imgui.GetContentRegionAvail().y - 78)
+            local w = imgui.GetContentRegionAvail().x
+            local h = w / ar
+            if h > maxH then h = maxH; w = h * ar end
+            imgui.Image(c.tex, ImVec2(w, h))
+        else
+            imgui.TextColored(C.dim, "%s", "Loading the picture...")
+        end
+        imgui.Spacing()
+        shotButtons(e)
+        return dirty
+    end
+
+    if #shots == 0 then
+        sectionHeader("IMAGES", "Gallery")
+        imgui.Spacing()
+        imgui.TextColored(C.dim, "%s", "No screenshots in this folder yet. Press F8 in game, then Refresh.")
+        return dirty
+    end
+
+    local pages = math.max(1, math.ceil(#shots / SHOT_PER_PAGE))
+    if shotPage > pages - 1 then shotPage = pages - 1 end
+    sectionHeader("IMAGES", ("Gallery  -  %d pictures"):format(#shots))
+    imgui.Spacing()
+
+    local picked = {}
+    for _, s in ipairs(shots) do
+        local mb = shotMark[s.path]
+        if mb and mb[0] then picked[#picked + 1] = s end
+    end
+
+    local sideW  = 220
+    local totalW = imgui.GetContentRegionAvail().x
+    local gridW  = math.max(240, totalW - sideW - 10)
+    local boxH   = math.max(170, imgui.GetContentRegionAvail().y - 6)
+
+    imgui.BeginChild("##shotgrid", ImVec2(gridW, boxH), false)
+    local cols  = (gridW >= 430) and SHOT_COLS or 2
+    local cellW = (gridW - 26 - 10 * (cols - 1)) / cols
+    for i = 1, SHOT_PER_PAGE do
+        local idx = shotPage * SHOT_PER_PAGE + i
+        local item = shots[idx]
+        if not item then break end
+        if (i - 1) % cols ~= 0 then imgui.SameLine() end
+        imgui.BeginGroup()
+        local cellH = cellW / shotAspect(item)
+        local c = shotTexture(item)
+        if c and c.tex then
+            if imgui.ImageButton(c.tex, ImVec2(cellW, cellH)) then shotSel = idx end
+        else
+            if imgui.Button("...##shot" .. idx, ImVec2(cellW, cellH)) then shotSel = idx end
+        end
+        local mb = shotMark[item.path]
+        if not mb then
+            mb = new.bool(false)
+            shotMark[item.path] = mb
+        end
+        imgui.Checkbox("##pick" .. idx, mb)
+        imgui.SameLine()
+        imgui.TextColored(shotLinks[item.path] and C.green or C.dim, "%s", item.name)
+        imgui.EndGroup()
+    end
+    imgui.EndChild()
+
+    imgui.SameLine()
+    imgui.BeginChild("##shotside", ImVec2(0, boxH), false)
+    if imgui.Button("<##shotprev", ImVec2(40, 24)) then
+        if shotPage > 0 then shotPage = shotPage - 1 end
+    end
+    imgui.SameLine()
+    if imgui.Button(">##shotnext", ImVec2(40, 24)) then
+        if shotPage < pages - 1 then shotPage = shotPage + 1 end
+    end
+    imgui.SameLine()
+    imgui.AlignTextToFramePadding()
+    imgui.TextColored(C.dim, "%s", ("%d / %d"):format(shotPage + 1, pages))
+
+    imgui.Spacing()
+    imgui.Separator()
+    imgui.Spacing()
+
+    if #picked == 0 then
+        imgui.TextColored(C.dim, "%s", "Tick the pictures you want in one album.")
+    else
+        imgui.TextColored(C.title, "%s", ("%s  %d selected"):format(icon("IMAGES"), #picked))
+        imgui.Spacing()
+        imgui.TextColored(C.dim, "%s", "Album title")
+        if imgui.RadioButtonIntPtr("Date & time##tm0", albumMode, 0) then dirty = true end
+        if imgui.RadioButtonIntPtr("Last target##tm1", albumMode, 1) then dirty = true end
+        imgui.TextColored(C.dim, "%s", albumTitle())
+        if albumMode[0] == 1 and not lastTargetName then
+            imgui.TextColored(C.red, "%s", "No target yet this session.")
+        end
+        imgui.Spacing()
+        if upload.active then
+            imgui.TextColored(C.title, "%s", "Uploading...")
+        else
+            local label = icon("CLOUD_ARROW_UP") .. ("  Upload %d as album"):format(#picked)
+            if imgui.Button(label .. "##album", ImVec2(-1, 28)) then startUpload(picked, true) end
+        end
+        if imgui.Button("Clear selection##clrsel", ImVec2(-1, 24)) then
+            for _, mb in pairs(shotMark) do mb[0] = false end
+        end
+    end
+
+    if albumLink then
+        imgui.Spacing()
+        imgui.Separator()
+        imgui.Spacing()
+        imgui.TextColored(C.green, "%s", icon("LINK") .. "  Album ready")
+        if imgui.Button(icon("COPY") .. "  Copy album link##calb", ImVec2(-1, 26)) then
+            pcall(imgui.SetClipboardText, albumLink)
+            upload.status = "Album link copied."
+        end
+    end
+    imgui.EndChild()
+
+    return dirty
+end
+
+local settingsWasOpen = false
+local settingsFrame
+
+settingsFrame = imgui.OnFrame(
+    function()
+        local open = settingsOpen[0]
+        if settingsWasOpen and not open then clearShotsSession() end
+        settingsWasOpen = open
+        return open
+    end,
     function()
         local sw, sh = getScreenResolution()
         imgui.SetNextWindowPos(ImVec2(sw / 2, sh / 2), imgui.Cond.FirstUseEver, ImVec2(0.5, 0.5))
         imgui.SetNextWindowSize(ImVec2(800, 520), imgui.Cond.FirstUseEver)
+        imgui.SetNextWindowSizeConstraints(ImVec2(780, 430), ImVec2(imgui.FLT_MAX, imgui.FLT_MAX))
+        fixStuckInput()
 
         imgui.PushStyleVarFloat(imgui.StyleVar.WindowRounding, 10.0)
         imgui.PushStyleVarFloat(imgui.StyleVar.FrameRounding, 4.0)
@@ -1456,7 +2095,7 @@ imgui.OnFrame(
         imgui.PushStyleColor(imgui.Col.SliderGrab, tint(0.30, 0.55, 1.0))
         imgui.PushStyleColor(imgui.Col.SliderGrabActive, ImVec4(prim[0], prim[1], prim[2], 1.0))
 
-        imgui.Begin("Hitman Console (last update: 03.07.2026)###hitman_settings", settingsOpen, SETTINGS_FLAGS)
+        imgui.Begin("Hitman Console (last update: 02.11.2026)###hitman_settings", settingsOpen, SETTINGS_FLAGS)
         imgui.SetWindowFontScale(HUD_SCALE)
 
         local dirty = false
@@ -1575,6 +2214,17 @@ imgui.OnFrame(
                 imgui.EndTabItem()
             end
 
+            if imgui.BeginTabItem("  Screenshots  ") then
+                if not shotsTabOpen then
+                    shotsTabOpen = true
+                    refreshShots(true)
+                end
+                if drawShotsTab() then dirty = true end
+                imgui.EndTabItem()
+            else
+                shotsTabOpen = false
+            end
+
             if imgui.BeginTabItem("  Stats  ") then
                 imgui.Spacing()
 
@@ -1634,3 +2284,5 @@ imgui.OnFrame(
         if dirty then saveData() end
     end
 )
+
+settingsFrame.LockPlayer = true
