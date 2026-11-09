@@ -1,4 +1,4 @@
-local MOD_VERSION = "2.1"
+local MOD_VERSION = "2.2"
 
 script_name("Hitman Console")
 script_author("L0K3D")
@@ -587,6 +587,7 @@ function main()
     local function toggleSettings(arg)
         if type(arg) == "string" and arg:lower():match("^%s*fix%s*$") then
             sampAddChatMessage("{5CA3FA}Hitman Console{FFFFFF}: reloading to reset the menu...", -1)
+            saveData()
             lua_thread.create(function()
                 wait(100)
                 thisScript():reload()
@@ -958,9 +959,15 @@ function sampev.onTextDrawHide(id)
     if id == undercoverTdId then selfUndercover = false end
 end
 
+local function noChat(s, phrase)
+    local head = s:match("^[^:]*") or s
+    return head:find(phrase, 1, true) ~= nil
+end
+
 function sampev.onServerMessage(color, text)
     if type(text) ~= "string" then return end
     text = text:gsub("%[(%d+)%]", "(%1)")
+    local plain = text:gsub("{%x%x%x%x%x%x}", ""):gsub("^%s+", "")
 
     if os.clock() < secExpect then
         local bare = text:gsub("{%x%x%x%x%x%x}", ""):match("^%s*(%d+)%s*$")
@@ -980,7 +987,7 @@ function sampev.onServerMessage(color, text)
         end
     end
 
-    if cancelTime > 0 and not secLoginPhase and text:find("Trebuie sa astepti", 1, true) then
+    if cancelTime > 0 and not secLoginPhase and noChat(plain, "Trebuie sa astepti") then
         if os.time() - cancelTime < 310 then
             secActive = true
             secEndTime = cancelTime
@@ -990,17 +997,17 @@ function sampev.onServerMessage(color, text)
         end
     end
 
-    if text:find("currently inside", 1, true) and (text:find("interior", 1, true) or text:find("house", 1, true)) then
+    if noChat(plain, "currently inside") and (plain:find("interior", 1, true) or plain:find("house", 1, true)) then
         contractIndoors = true
     end
 
-    if text:find("You have disabled your current checkpoint", 1, true) then
+    if plain:match("^You have disabled your current checkpoint") then
         if os.clock() >= diedUntil and not isCharDead(PLAYER_PED) then clearTarget() end
         if os.clock() < killcpUntil then return false end
         return
     end
 
-    if text:find("you had the checkpoint on", 1, true) and text:find("has disconnected", 1, true) then
+    if noChat(plain, "you had the checkpoint on") and plain:find("has disconnected", 1, true) then
         if contract.active then
             endContract("disconnected")
         else
@@ -1009,25 +1016,25 @@ function sampev.onServerMessage(color, text)
         return
     end
 
-    local t = text:lower()
-    if t:find("now undercover", 1, true) then
+    local t = plain:lower()
+    if noChat(t, "now undercover") then
         selfUndercover = true
-    elseif t:find("not undercover anymore", 1, true) then
+    elseif noChat(t, "not undercover anymore") then
         selfUndercover = false
     end
 
-    if text:find("Anyone can see your name", 1, true) then
+    if noChat(plain, "Anyone can see your name") then
         diedUntil = os.clock() + 6
     end
 
-    local who, onoff = text:match("%*?%s*(.-)%s+turns%s+(%a+)%s+.-[Pp]hone")
+    local who, onoff = plain:match("^%*?%s*(.-)%s+turns%s+(%a+)%s+.-[Pp]hone")
     if who and onoff then
         if isMe(who) then
             selfPhoneOn = (onoff:lower() == "on")
         end
     end
 
-    if awaitMotd and text:find("(Group) MOTD:", 1, true) then
+    if awaitMotd and plain:match("^%(Group%) MOTD:") then
         awaitMotd = false
         secActive = true
         secValue = 0
@@ -1041,8 +1048,8 @@ function sampev.onServerMessage(color, text)
         cancelTime = 0
     end
 
-    local rcvName, rcvFac = text:match("^(.-) from (.-) received a contract")
-    if not rcvName then rcvName = text:match("^(.-) received a contract") end
+    local rcvName, rcvFac = plain:match("^(.-) from (.-) received a contract")
+    if not rcvName then rcvName = plain:match("^(.-) received a contract") end
     if rcvName then
         if isMe(rcvName) then
             secDone = true
@@ -1063,12 +1070,9 @@ function sampev.onServerMessage(color, text)
         return
     end
 
-    local cName, cPid = text:match("You have a contract on%s*(.+)%s*%((%d+)%)")
+    local cName, cPid = plain:match("^You have a contract on%s*(.+)%s*%((%d+)%)")
     if not cName then
-        cName, cPid = text:match("You have a contract on%s*(.-)%s*%[(%d+)%]%s*$")
-    end
-    if not cName then
-        cName = text:match("You have a contract on%s*(.+)")
+        cName = plain:match("^You have a contract on%s*(.+)")
     end
     if cName then
         contract.active = true
@@ -1085,9 +1089,9 @@ function sampev.onServerMessage(color, text)
         return
     end
 
-    local fName, fDist = text:match("Checkpoint%-ul va afisa locatia playerului%s*(.-)%.%s*Distanta pana la player:%s*(%d+)")
+    local fName, fDist = plain:match("^Checkpoint%-ul va afisa locatia playerului%s*(.-)%.%s*Distanta pana la player:%s*(%d+)")
     if not fName then
-        fName, fDist = text:match("The checkpoint has been set on%s*(.-)%.%s*Distance:%s*(%d+)")
+        fName, fDist = plain:match("^The checkpoint has been set on%s*(.-)%.%s*Distance:%s*(%d+)")
     end
     if fName and fDist then
         target.name       = cleanName(fName)
@@ -1104,7 +1108,7 @@ function sampev.onServerMessage(color, text)
         return
     end
 
-    local sName, sAmt = text:match("^(.-) has a contract of (%$[%d,]+) on him")
+    local sName, sAmt = plain:match("^(.-) has a contract of (%$[%d,]+) on him")
     if sName and sAmt then
         local sNum = tonumber((sAmt:gsub("[%$,]", "")))
         contract.sum = sNum and ("$" .. dots(sNum)) or sAmt
@@ -1168,22 +1172,21 @@ function sampev.onServerMessage(color, text)
         end
     end
 
-    if os.clock() < report.hideUntil and text:find("Loading faction activity", 1, true) then
+    if os.clock() < report.hideUntil and plain:match("^Loading faction activity") then
         return false
     end
 
     if os.clock() < report.expect then
-        local plain = text:gsub("{%x%x%x%x%x%x}", "")
-        local rd, rt = plain:match("Targets killed:%s*(%-?%d+)%s*/%s*(%-?%d+)")
-        if not rd then rd, rt = plain:match("Contracte efectuate:%s*(%-?%d+)%s*/%s*(%-?%d+)") end
+        local rd, rt = plain:match("^Targets killed:%s*(%-?%d+)%s*/%s*(%-?%d+)")
+        if not rd then rd, rt = plain:match("^Contracte efectuate:%s*(%-?%d+)%s*/%s*(%-?%d+)") end
         if rd and rt then
             report.done, report.total, report.active = rd, rt, true
             if os.clock() < report.hideUntil then return false end
             return
         end
 
-        local rh, rhr = plain:match("Hours played:%s*([%-%d:]+)%s*/%s*([%-%d:]+)")
-        if not rh then rh, rhr = plain:match("Ore jucate:%s*([%-%d:]+)%s*/%s*([%-%d:]+)") end
+        local rh, rhr = plain:match("^Hours played:%s*([%-%d:]+)%s*/%s*([%-%d:]+)")
+        if not rh then rh, rhr = plain:match("^Ore jucate:%s*([%-%d:]+)%s*/%s*([%-%d:]+)") end
         if rh and rhr then
             report.hours, report.hoursReq, report.active = rh, rhr, true
             if os.clock() < report.hideUntil then return false end
@@ -1192,19 +1195,19 @@ function sampev.onServerMessage(color, text)
     end
 
     if contract.active then
-        local done = text:match("^(.-) from .- has succe.-completed the contract") or text:match("^(.-) has succe.-completed the contract")
+        local done = plain:match("^(.-) from .- has succe.-completed the contract") or plain:match("^(.-) has succe.-completed the contract")
         if done and isMe(done) then
-            local raw = (text:match("for %$([%d,]+)") or "0"):gsub(",", "")
+            local raw = (plain:match("for %$([%d,]+)") or "0"):gsub(",", "")
             local money = tonumber(raw) or 0
             recordContract(true, money)
             endContract("done"); return
         end
-        local failed = text:match("^(.-) from .- failed to complete the contract") or text:match("^(.-) failed to complete the contract")
+        local failed = plain:match("^(.-) from .- failed to complete the contract") or plain:match("^(.-) failed to complete the contract")
         if failed and isMe(failed) then
             recordContract(false, 0)
             endContract("failed"); return
         end
-        local canceled = text:match("^(.-) from .- canceled his contract") or text:match("^(.-) canceled his contract")
+        local canceled = plain:match("^(.-) from .- canceled his contract") or plain:match("^(.-) canceled his contract")
         if canceled and isMe(canceled) then endContract("cancelled"); return end
     end
 end
@@ -2095,7 +2098,7 @@ settingsFrame = imgui.OnFrame(
         imgui.PushStyleColor(imgui.Col.SliderGrab, tint(0.30, 0.55, 1.0))
         imgui.PushStyleColor(imgui.Col.SliderGrabActive, ImVec4(prim[0], prim[1], prim[2], 1.0))
 
-        imgui.Begin("Hitman Console (last update: 02.11.2026)###hitman_settings", settingsOpen, SETTINGS_FLAGS)
+        imgui.Begin("Hitman Console (last update: 10.11.2026)###hitman_settings", settingsOpen, SETTINGS_FLAGS)
         imgui.SetWindowFontScale(HUD_SCALE)
 
         local dirty = false
